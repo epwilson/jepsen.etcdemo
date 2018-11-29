@@ -2,14 +2,17 @@
   (:require [clojure.tools.logging :refer :all]
             [clojure.string :as str]
             [verschlimmbesserung.core :as v]
-            [jepsen [cli :as cli]
+            [jepsen [checker :as checker]
+                    [cli :as cli]
                     [client :as client]
                     [control :as c]
                     [db :as db]
                     [generator :as gen]
                     [tests :as tests]]
+            [jepsen.checker.timeline :as timeline]
             [jepsen.control.util :as cu]
             [jepsen.os.debian :as debian]
+            [knossos.model :as model]
             [slingshot.slingshot :refer [try+]]))
 
 (def dir "/opt/etcd")
@@ -127,7 +130,12 @@
           :generator (->> (gen/mix [r w cas])
                           (gen/stagger 1)
                           (gen/nemesis nil)
-                          (gen/time-limit 15))}))
+                          (gen/time-limit 15))
+          :model   (model/cas-register)
+          :checker (checker/compose
+                     {:perf     (checker/perf)
+                      :linear   (checker/linearizable)
+                      :timeline (timeline/html)})}))
 
 (defn -main
   "handles command line arguments. Can either run a test, or a web server for browsing results."
