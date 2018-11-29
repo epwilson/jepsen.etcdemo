@@ -8,6 +8,7 @@
                     [control :as c]
                     [db :as db]
                     [generator :as gen]
+                    [nemesis :as nemesis]
                     [tests :as tests]]
             [jepsen.checker.timeline :as timeline]
             [jepsen.control.util :as cu]
@@ -98,7 +99,7 @@
 
   (invoke! [this test op]
     (case (:f op)
-      :read (assoc op :type :ok, :value (parse-long (v/get conn "foo")))
+      :read (assoc op :type :ok, :value (parse-long (v/get conn "foo" {:quorum? true})))
       :write (do (v/reset! conn "foo" (:value op))
                  (assoc op :type, :ok))
       :cas (try+
@@ -127,10 +128,15 @@
           :os   debian/os
           :db   (db "v3.1.5")
           :client (Client. nil)
+          :nemesis   (nemesis/partition-random-halves)
           :generator (->> (gen/mix [r w cas])
-                          (gen/stagger 1)
-                          (gen/nemesis nil)
-                          (gen/time-limit 15))
+                          (gen/stagger 1/10)
+                          (gen/nemesis
+                            (gen/seq (cycle [(gen/sleep 5)
+                                             {:type :info, :f :start}
+                                             (gen/sleep 5)
+                                             {:type :info, :f :stop}])))
+                          (gen/time-limit (:time-limit opts)))
           :model   (model/cas-register)
           :checker (checker/compose
                      {:perf     (checker/perf)
