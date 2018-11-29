@@ -3,13 +3,14 @@
             [clojure.string :as str]
             [verschlimmbesserung.core :as v]
             [jepsen [checker :as checker]
-                    [cli :as cli]
-                    [client :as client]
-                    [control :as c]
-                    [db :as db]
-                    [generator :as gen]
-                    [nemesis :as nemesis]
-                    [tests :as tests]]
+             [cli :as cli]
+             [client :as client]
+             [control :as c]
+             [db :as db]
+             [generator :as gen]
+             [independent :as independent]
+             [nemesis :as nemesis]
+             [tests :as tests]]
             [jepsen.checker.timeline :as timeline]
             [jepsen.control.util :as cu]
             [jepsen.os.debian :as debian]
@@ -98,18 +99,24 @@
   (setup! [this test])
 
   (invoke! [this test op]
-    (case (:f op)
-      :read (assoc op :type :ok, :value (parse-long (v/get conn "foo" {:quorum? true})))
-      :write (do (v/reset! conn "foo" (:value op))
-                 (assoc op :type, :ok))
-      :cas (try+
-             (let [[old new] (:value op)]
-             (assoc op :type (if (v/cas! conn "foo" old new
-                                         {:prev-exist? true})
-                               :ok
-                               :fail)))
-             (catch [:errorCode 100] ex
-               (assoc op :type :fail, :error :not-found)))))
+    (let [[k v] (:value op)]
+      (try+
+        (case (:f op)
+          :read (assoc op
+                       :type :ok
+                       :value (independent/tuple k (parse-long (v/get conn k {:quorum? true}))))
+          :write (do (v/reset! conn k v)
+                     (assoc op :type, :ok))
+          :cas (let [[old new] v]
+                 (assoc op :type (if (v/cas! conn k old new
+                                             {:prev-exist? true})
+                                   :ok
+                                   :fail))))
+        (catch java.net.SocketTimeoutException e
+          (assoc op :type (if (= :read (:f op)) :fail :info) :error :timeout))
+
+        (catch [:errorCode 100] ex
+          (assoc op :type :fail, :error :not-found)))))
 
   (teardown! [this test])
 
@@ -129,8 +136,13 @@
           :db   (db "v3.1.5")
           :client (Client. nil)
           :nemesis   (nemesis/partition-random-halves)
-          :generator (->> (gen/mix [r w cas])
-                          (gen/stagger 1/10)
+          :generator (->> (independent/concurrent-generator
+                            10
+                            (range)
+                            (fn [k]
+                              (->> (gen/mix [r w cas])
+                                   (gen/stagger 1/10)
+                                   (gen/limit 100))))
                           (gen/nemesis
                             (gen/seq (cycle [(gen/sleep 5)
                                              {:type :info, :f :start}
@@ -140,8 +152,10 @@
           :model   (model/cas-register)
           :checker (checker/compose
                      {:perf     (checker/perf)
-                      :linear   (checker/linearizable)
-                      :timeline (timeline/html)})}))
+                      :indep    (independent/checker
+                                  (checker/compose
+                                    {:timeline (timeline/html)
+                                     :linear   (checker/linearizable)}))})}))
 
 (defn -main
   "handles command line arguments. Can either run a test, or a web server for browsing results."
