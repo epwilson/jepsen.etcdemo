@@ -104,7 +104,7 @@
         (case (:f op)
           :read (assoc op
                        :type :ok
-                       :value (independent/tuple k (parse-long (v/get conn k {:quorum? true}))))
+                       :value (independent/tuple k (parse-long (v/get conn k {:quorum? (:quorum test)}))))
           :write (do (v/reset! conn k v)
                      (assoc op :type, :ok))
           :cas (let [[old new] v]
@@ -127,39 +127,59 @@
     ))
 
 (defn etcd-test
-  "Takes cli options and constructrs a test map"
+  "Given an options map from the command line runner (e.g. :nodes, :ssh, :concurrency ...),
+  constructs a test map. Special options:
+
+    :quorum       Whether to use quorum reads
+    :rate         Approximate number of requests per second, per thread
+    :ops-per-key  Maximum number of operations allowed on any given key"
   [opts]
-  (merge tests/noop-test
-         opts
-         {:name "etcd"
-          :os   debian/os
-          :db   (db "v3.1.5")
-          :client (Client. nil)
-          :nemesis   (nemesis/partition-random-halves)
-          :generator (->> (independent/concurrent-generator
-                            10
-                            (range)
-                            (fn [k]
-                              (->> (gen/mix [r w cas])
-                                   (gen/stagger 1/10)
-                                   (gen/limit 100))))
-                          (gen/nemesis
-                            (gen/seq (cycle [(gen/sleep 5)
-                                             {:type :info, :f :start}
-                                             (gen/sleep 5)
-                                             {:type :info, :f :stop}])))
-                          (gen/time-limit (:time-limit opts)))
-          :model   (model/cas-register)
-          :checker (checker/compose
-                     {:perf     (checker/perf)
-                      :indep    (independent/checker
-                                  (checker/compose
-                                    {:timeline (timeline/html)
-                                     :linear   (checker/linearizable)}))})}))
+  (let [quorum (boolean (:quorum opts))]
+    (merge tests/noop-test
+           opts
+           {:name   (str "etcd q=" quorum)
+            :quorum quorum
+            :os     debian/os
+            :db     (db "v3.1.5")
+            :client (Client. nil)
+            :nemesis   (nemesis/partition-random-halves)
+            :generator (->> (independent/concurrent-generator
+                              10
+                              (range)
+                              (fn [k]
+                                (->> (gen/mix [r w cas])
+                                     (gen/stagger (/ (:rate opts)))
+                                     (gen/limit (:ops-per-key opts)))))
+                            (gen/nemesis
+                              (gen/seq (cycle [(gen/sleep 5)
+                                               {:type :info, :f :start}
+                                               (gen/sleep 5)
+                                               {:type :info, :f :stop}])))
+                            (gen/time-limit (:time-limit opts)))
+            :model   (model/cas-register)
+            :checker (checker/compose
+                       {:perf     (checker/perf)
+                        :indep    (independent/checker
+                                    (checker/compose
+                                      {:timeline (timeline/html)
+                                       :linear   (checker/linearizable)}))})})))
+
+(def cli-opts
+  "Additional command line options."
+  [["-q" "--quorum" "Use quorum reads, instead of reading from any primary."]
+   ["-r" "--rate HZ" "Approximate number of requests per second, per thread."
+    :default 10
+    :parse-fn read-string
+    :validate [#(and (number? %) (pos? %)) "Must be a positive number"]]
+   [nil "--ops-per-key NUM" "Maximum number of operations on any given key."
+    :default 100
+    :parse-fn parse-long
+    :validate [pos? "Must be a positive integer."]]])
 
 (defn -main
   "handles command line arguments. Can either run a test, or a web server for browsing results."
   [& args]
-  (cli/run! (merge (cli/single-test-cmd {:test-fn etcd-test})
+  (cli/run! (merge (cli/single-test-cmd {:test-fn etcd-test
+                                         :opt-spec cli-opts})
                    (cli/serve-cmd))
             args))
